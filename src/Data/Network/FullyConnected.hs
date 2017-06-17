@@ -7,7 +7,8 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 module Data.Network.FullyConnected
-  (FeedForwardFC, weights, biases, activation)
+  (FeedForwardFC, FullyConnected(FC), Layers,
+   weights, biases, activation)
 where
 
 import Numeric.LinearAlgebra as LA hiding (fromList, toList)

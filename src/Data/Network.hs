@@ -72,7 +72,7 @@ class (NFData a) => Network i a | a -> i where
 -- Linked list Structure for feedforward neural network
 data Layers :: * -> * where
   Output :: !a -> Layers a
-  (:=>) :: !a -> !(Layers a) -> Layers a 
+  (:=>) :: !a -> !(Layers a) -> Layers a deriving (Eq)
   
 infixr 5 :=>
 
