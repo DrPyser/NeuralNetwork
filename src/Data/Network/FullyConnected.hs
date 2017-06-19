@@ -8,7 +8,8 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 module Data.Network.FullyConnected
   (FeedForwardFC, FullyConnected(FC), Layers,
-   weights, biases, activation)
+   weights, biases, activation,
+   unGrad, unGradBatch, Grad(GradBatch, Grad))
 where
 
 import Numeric.LinearAlgebra as LA hiding (fromList, toList)
@@ -37,25 +38,25 @@ instance (V.Storable a, NFData a) => NFData (FullyConnected i a) where
 instance Layer (Vector R) (FullyConnected (Vector R) R) where
   compute (FC weights biases _) input = biases + (input <# weights)
   run     l@(FC weights biases af) input = unAct af (compute l input)
-  makeRandomLayer g rf i o af = let rnds = (randomRs (-1,1) g) :: [Double]
+  makeRandomLayer g rf i o af = let rnds = (randomRs (0,1) g) :: [Double]
                                     rnds' = (rf rnds) 
                                     rw   = (i><o) rnds'
-                                    rb   = o |> (drop (i*o) rnds')
-                                in  (FC rw rb af)
+                                    rb   = o |> (repeat 0)
+                                in (FC rw rb af)
 
 instance Layer (Matrix R) (FullyConnected (Matrix R) R) where
   compute (FC weights biases _) input = (fromRows $ replicate (rows input) biases) + (input <> weights)
   run     l@(FC _ _ af) input = unAct af (compute l input)
-  makeRandomLayer g rf i o af = let rnds = (randomRs (-1,1) g) :: [Double]
+  makeRandomLayer g rf i o af = let rnds = (randomRs (0,1) g) :: [Double]
                                     rnds' = (rf rnds) 
                                     rw   = (i><o) rnds'
-                                    rb   = o |> (drop (i*o) rnds')
-                                in  (FC rw rb af)
+                                    rb   = o |> (repeat 0)
+                                in (FC rw rb af)
 
 
 instance (Container Matrix a, Container Vector a, Num a) => Show (FullyConnected i a) where
   show l = let (a,b) = size $ weights l
-           in "Layer " ++ (show a) ++ "x" ++ (show b)
+           in "Layer " ++ (show a) ++ "x" ++ (show b) ++ " " ++ (name $ activation l)
 
 instance Floating a => Num (FullyConnected a Double) where
   (FC w b a) + (FC w' b' _) = FC (w + w') (b + b') a
@@ -63,12 +64,12 @@ instance Floating a => Num (FullyConnected a Double) where
   (FC w b a) * (FC w' b' _) = FC (w * w') (b * b') a
   abs (FC w b a) = FC (abs w) (abs b) a
   signum (FC w b a) = FC (signum w) (signum b) a
-  fromInteger x = FC (fromInteger x) (fromInteger x) (act id)
+  fromInteger x = FC (fromInteger x) (fromInteger x) (act id "identity")
 
 instance Floating a => Fractional (FullyConnected a Double) where
   (FC w b a) / (FC w' b' _) = FC (w / w') (b / b') a
   recip (FC w b a) = FC (recip w) (recip b) a
-  fromRational a = FC (fromRational a) (fromRational a) (act id)
+  fromRational a = FC (fromRational a) (fromRational a) (act id "identity")
 
 instance (Container Vector a, Container Matrix a) => Linear a (FullyConnected i) where
   scale x (FC w b a) = FC (scale x w) (scale x b) a
@@ -82,11 +83,11 @@ instance (Layer i (FullyConnected i Double)) => Network i (Layers (FullyConnecte
   runLayers  (l :=> n)  i = let y = (run l i)
                             in  y:(runLayers n (fst y))
 
-  makeRandomNetwork g t i [] (o, af) = let l = makeRandomLayer g t i o af
-                                       in  (Output l)
-  makeRandomNetwork g t i ((h,haf):hs) o = let (g1,g2) = split g
-                                               l = makeRandomLayer g1 t i h haf
-                                           in  l :=> (makeRandomNetwork g2 t h hs o)
+  makeRandomNetwork g t nt i [] (o, af) = let l = makeRandomLayer g t i o af
+                                          in  (Output l)
+  makeRandomNetwork g t nt i ((h,haf):hs) o = let (g1,g2) = split g
+                                                  l = makeRandomLayer g1 t i h haf
+                                              in nt $ l :=> (makeRandomNetwork g2 t nt h hs o)
 
 type FeedForwardFC i = Layers (FullyConnected i Double)
 
@@ -108,7 +109,7 @@ instance (Monad m) => GradientDescent (NetworkEvaluator Batch) ((FeedForwardFC B
   -- parameters of loss function: Network(weights, biases, activation functions for each layer)
   -- and sample((input, output) pair)
     
-  data Grad (NetworkEvaluator Batch) = GradBatch { unGradBatch :: ([Matrix Double], [Vector Double]) }
+  data Grad (NetworkEvaluator Batch) = GradBatch { unGradBatch :: ([Matrix Double], [Vector Double]) } deriving (Show)
 
   -- Gradients over parameters(weights, biases)
   grad lf (n, (i,t)) = do
@@ -121,7 +122,9 @@ instance (Monad m) => GradientDescent (NetworkEvaluator Batch) ((FeedForwardFC B
 
   move lr (n, (i,t)) (GradBatch (gs, ds)) = do
     -- update function
-    let update = (\(FC w b af) g δ -> FC (w - lr.*g) (b - lr.*δ) af)
+    -- divide by batch size
+    let r = fromIntegral $ rows i
+        update = (\(FC w b af) g δ -> FC (w + (lr/r).*g) (b + (lr/r).*δ) af)
         n' = Network.fromList $ zipWith3 update (Network.toList n) gs ds -- new model
     return (n', (i,t))
 
@@ -129,7 +132,7 @@ instance (Monad m) => GradientDescent (NetworkEvaluator Data) ((FeedForwardFC Da
   -- parameters of loss function: Network(weights, biases, activation functions for each layer)
   -- and sample((input, output) pair)
     
-  data Grad (NetworkEvaluator Data) = Grad { unGrad :: ([Matrix Double], [Vector Double]) }
+  data Grad (NetworkEvaluator Data) = Grad { unGrad :: ([Matrix Double], [Vector Double]) } deriving (Show)
 
   -- Gradients over parameters(weights, biases)
   grad lf (n, (i,t)) = do
@@ -142,7 +145,7 @@ instance (Monad m) => GradientDescent (NetworkEvaluator Data) ((FeedForwardFC Da
 
   move lr (n, (i,t)) (Grad (gs, ds)) = do
     -- update function
-    let update = (\(FC w b af) g δ -> FC (w - lr.*g) (b - lr.* δ) af)
+    let update = (\(FC w b af) g δ -> FC (w + lr.*g) (b + lr.* δ) af)
         n' = Network.fromList $ zipWith3 update (Network.toList n) gs ds -- new model
     return (n', (i,t))
 

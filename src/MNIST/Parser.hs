@@ -63,7 +63,7 @@ type MNISTSet = ((Int, Int), Int, [MNISTSample])
 
 -- maps a Word8 value into a number between 0 and 1
 word8ToDouble :: Word8 -> Double
-word8ToDouble w = (fromIntegral w) / 256.0
+word8ToDouble w = (fromIntegral w) / 255.0
 
 
 chunksOf :: V.Storable a => Int -> V.Vector a -> [V.Vector a]

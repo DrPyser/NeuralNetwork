@@ -1,5 +1,5 @@
--- tests/NetworkSpec.hs
-module NetworkSpec (spec) where
+-- tests/Data/NetworkSpec.hs
+module Data.NetworkSpec (spec) where
 
 import Test.Hspec
 

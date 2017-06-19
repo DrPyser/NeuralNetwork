@@ -1,5 +1,7 @@
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeFamilies #-}
 
 module Main where
 
@@ -10,18 +12,20 @@ import qualified Data.ByteString as B
 import Data.Bifunctor
 import Data.Functor
 import Data.Word8
+import qualified Data.Vector.Storable as V
 import Control.Monad
--- import Control.Monad.State
--- import Control.Monad.Writer
+import Control.Arrow
+import Control.Applicative
 import Pipes as P
 import qualified Pipes.Prelude as PP
 import System.Random
 import Parser
 import Data.Network
-import Data.Network.FullyConnected
+import Data.Network.FullyConnected as FC
 import Algorithm.Training
+import Algorithm.GradientDescent
 import Data.Network.Activation
-import Data.Network.Utils (makeBatchP, repeatM, squeeze, unzipP, integersP)
+import Data.Network.Utils (makeBatchP, repeatM, squeeze, unzipP, integersP, toGaussian)
 
 -- import System.Random
 -- import Data.Binary.Get
@@ -51,48 +55,61 @@ main = do
         Right ((nrows', ncols'), nsamples', samples') -> do
           putStrLn "MNIST test dataset succesfully parsed!"
           putStrLn $ show nsamples' ++ " test samples of " ++ show nrows' ++ "x" ++ show ncols' ++ " labeled images."
-
-          let batchsize = 1
+          
+          let batchsize = 20
               -- Sample producer
               trainingSamplesP = each samples :: Producer MNISTSample IO ()
               (imageP, labelP) = unzipP trainingSamplesP :: (Producer Image IO (), Producer Label IO ())
               -- Batch sample producer(pairs of matrix)
-              trainingBatches = PP.zip (imageP >-> (makeBatchP batchsize)) (labelP  >-> (makeBatchP batchsize)) 
-          -- runEffect $ for (trainingBatches >-> (PP.take 10)) $ \(a,b) -> do
-          --   lift $ print b
-          -- let epochs   = 3
+              trainingBatches = PP.zip (imageP >-> (makeBatchP batchsize)) (labelP  >-> (makeBatchP batchsize))
           g <- getStdGen
-          let !(model :: FeedForwardFC Batch) = (makeRandomNetwork g (id) 784 [(30, logistic)] (10, softmaxMat))
-              lf = mseBatch
-              lrf = \n -> exp (-(1.0 + fromIntegral n))
-              tolerance = 0.0000001
-              reporter = print 
-              interval = 1
-              stopper = closeEnough tolerance
-              loop m = do
+          -- let xavier = fmap (\(FC w b af) -> FC (scale (sqrt $ recip $ fromIntegral $ (uncurry (+)) (size w)) w) b af)
+          let !(model :: FeedForwardFC Batch) = (makeRandomNetwork g id id 784 [(30, logistic)] (10, softmaxMat))
+              -- !model' = fmap (\(FC w b af) -> let (u,_,_) = svd w in (FC u b af)) model
+              lf = mse
+              lrf = const 1 -- \n -> exp (-(1.0 + fromIntegral n))
+              tolerance = 0.0001
+              reporter (i,t) ts = do
+                putStr "."
+                -- putStrLn "Weights : "
+                -- mapM_ (print . fst) $ runLayers (tsmodel ts) i
+                -- putStrLn "Gradients: "
+                -- GradBatch (gs, ds) <- grad lf (tsmodel ts, (i,t))
+                -- mapM_ (putStrLn . disps 5) gs
+                -- mapM_ print ds
+              -- predict = \i ts -> mapM_ (print . fst) $ runLayers (tsmodel ts) i
+              interval = 10
+              stopper = (uncurry (liftM2 (<|>)) . ((closeEnough tolerance) &&& (longEnough 100)))
+              loop m = do -- the actual training steps
                 s@(sid, (i,t)) <- await
                 lift $ putStrLn $ "Input " ++ show (fst s)
-                lift $ putStrLn $ "Prediction: " ++ show (fst $ runNetwork m i)
-                r <- lift $ runEffect $ (stepP m lf 0 lrf s) >-> reportP interval reporter >-> (descendP (stopper))
-                lift $ putStrLn $ "Loss vector: " ++ show (evaluate lf (t, fst $ runNetwork (tsmodel r) i))
+                -- lift $ putStrLn $ "Biases " ++ show (map biases $ Data.Network.toList m)
+                -- lift $ putStrLn $ "Weights " ++ show (map weights $ Data.Network.toList m)
+                -- lift $ putStrLn $ "Initial Prediction: " ++ show (map fst $ runLayers m i)
+                -- g <- PP.map (grad lf) (m, (i,t))
+                -- (m')
+                r <- lift $ runEffect $ (stepP m lf 0 lrf s) >-> reportP interval (reporter (i,t)) >->
+                  (descendP (stopper))
+                -- let r = runNetwork m i
+                -- let l = toDouble $ evaluate lf (t, fst r)
                 yield r
+                -- lift $ mapM_ ((>> putStrLn "") . print) (map weights $ Data.Network.toList (tsmodel r))
                 loop (tsmodel r)
-              trainingChain = PP.zip (integersP 0) trainingBatches >-> (PP.take 100) >-> (loop model)
+              
+              trainingChain m = PP.zip (integersP 0) trainingBatches >-> (PP.take 10000) >-> (loop m)
+              loop' m n = do
+                (Just r) <- lift $ PP.last (trainingChain m)
+                yield (n, r)
+                loop' (tsmodel r) (succ n)
+                
+          runEffect $ for ((loop' model 0) >-> (PP.take 10)) $ \(n,ts) -> do
+            lift $ putStrLn $ "Epoch: " ++ show n 
+            lift $ print ts
 
-          putStrLn "Model: "
-          -- mapM_ ((>> putStrLn "") . print) (map weights $ Network.toList model)
-          runEffect $ for trainingChain $ \tsminibatch ->
-            lift $ print tsminibatch
-          -- runEffect $ for trainingChain $ \ts -> do
-          --   lift $ print ts
-          -- let trainingRoom = replicateM 3 (last <$> forM samplesb' trainOnceBatch)
-          -- putStrLn "Beginning training"
-          -- let logresults   = runStateT trainingRoom ((3, 0.5), mseBatch, model)
-          -- ((l :: [LossBatch], (_,_,m)), log) <- runWriterT logresults
-          -- forM_ log $ \(str, l) -> do
-          --   putStrLn $ str ++ ": " ++ show l        
-          -- putStrLn $ "Final loss: " ++ (show $ norm_2 $ last l)
-      
+          -- runEffect $ for (trainingBatches >-> (PP.take 10)) $ \(i,l) -> do
+          --   lift $ putStrLn $ disps 5 i
+          --   lift $ print l
+          
       putStrLn "Done!"
     Left er -> putStrLn er
   

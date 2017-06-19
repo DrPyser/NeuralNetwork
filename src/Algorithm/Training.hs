@@ -88,20 +88,21 @@ instance AsDouble (Vector R) where
   toDouble = norm_2
 
 instance AsDouble (Matrix R) where
-  toDouble = norm_2
+  toDouble m = (F.sum . (fmap norm_2) . toRows) m / (fromIntegral $ rows m)
 
 -- A pipe that takes a sample and makes one step in the parameter space
 stepP :: (Monad m, AsDouble i, Network i n, GradientDescent (LossFunction i i) (n, (i,i)) m) =>
   n -> LossFunction i i -> Int -> (Int -> Double) -> (Int, (i,i)) -> Producer (TrainingState n) m r
 stepP m lf n lrf (sid, (i, t)) = loop m n where
   loop m n = do
---    (i, t) <- await -- get a sample
     let !η = lrf n -- compute learning rate for iteration
     (m', _) <- lift $ descend lf η (m, (i,t)) -- step    
     let o = fst $ runNetwork m' i -- test 
         loss = evaluate lf (t,o) -- evaluate
     m' `deepseq` yield $ TS m' η n (toDouble loss) sid -- yield new state
     loop m' (n+1)
+        
+       
 
 -- A pipe that produce a reporting action on a training state
 reportP :: (Monad m, AsDouble i, Network i n) => Int -> (TrainingState n -> m ()) -> Pipe (TrainingState n) (TrainingState n) m r
@@ -109,14 +110,17 @@ reportP interval action = P.mapM $ \ts -> do
   when (tsiteration ts `mod` interval == 0) (action ts)
   return ts
 
--- Does gradient descent given a stop condition
+
+type Stopper n x m = (TrainingState n, TrainingState n) -> m (Maybe x)
+
+-- Does gradient descent given a stop condition and a stream of "steps"(training states containing an updated model)
 descendP :: (Monad m, AsDouble i, Network i n) =>
-   (TrainingState n -> TrainingState n -> m (Maybe x)) -> Consumer (TrainingState n) m x
+    Stopper n x m-> Consumer (TrainingState n) m x
 descendP stopper = loop
   where loop = do
           ts <- await
           ts' <- await
-          mx <- lift (stopper ts ts')
+          mx <- lift (stopper (ts, ts'))
           case mx of
             Just x -> return x
             Nothing -> loop
@@ -124,18 +128,19 @@ descendP stopper = loop
 
 -- A stop condition: stop if the loss doesn't change significantly enough,
 -- returning the state with the minimum loss
-closeEnough :: (Network i n, Monad m) => Double -> (TrainingState n -> TrainingState n -> m (Maybe (TrainingState n)))
-closeEnough tolerance ts ts' = do
+closeEnough :: (Network i n, Monad m) => Double -> Stopper n (TrainingState n) m
+closeEnough tolerance (ts, ts') = do
   if abs (tsloss ts' - tsloss ts) < tolerance then
     return (Just $ minimumBy (comparing tsloss) [ts, ts']) else return Nothing
-    
-longEnough :: (Network i n, Monad m) => Int -> (TrainingState n -> TrainingState n -> m (Maybe (TrainingState n)))
-longEnough iteration ts ts' = if tsiteration ts' >= iteration then
+
+-- stops after a given number of iterations
+longEnough :: (Network i n, Monad m) => Int -> Stopper n (TrainingState n) m
+longEnough iteration (ts, ts') = if tsiteration ts' >= iteration then
   return (Just $ minimumBy (comparing tsloss) [ts, ts']) else return Nothing
 
-
-improvement :: (Network i n, Monad m) => Double -> (TrainingState n -> TrainingState n -> m (Maybe (TrainingState n)))
-improvement tolerance ts ts' = if ((tsloss ts' - tsloss ts) > tolerance) then
+-- stops when there's not enough improvement(i.e. loss reduction) between the two states
+improvement :: (Network i n, Monad m) => Double -> Stopper n (TrainingState n) m
+improvement tolerance (ts, ts') = if ((tsloss ts' - tsloss ts) > tolerance) then
   return (Just $ minimumBy (comparing tsloss) [ts, ts']) else return Nothing 
 
 

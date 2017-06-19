@@ -67,7 +67,7 @@ class (NFData a) => Network i a | a -> i where
   runNetwork :: a -> i -> (i,i)
   runLayers  :: a -> i -> [(i,i)]
   makeRandomNetwork :: (RandomGen g) =>
-    g -> ([Double] -> [Double]) -> Int -> [(Int, ActivationFunction i)] -> (Int, ActivationFunction i) -> a
+    g -> ([Double] -> [Double]) -> (a -> a) -> Int -> [(Int, ActivationFunction i)] -> (Int, ActivationFunction i) -> a
 
 -- Linked list Structure for feedforward neural network
 data Layers :: * -> * where
