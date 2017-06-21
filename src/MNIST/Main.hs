@@ -25,7 +25,7 @@ import Data.Network.FullyConnected as FC
 import Algorithm.Training
 import Algorithm.GradientDescent
 import Data.Network.Activation
-import Data.Network.Utils (makeBatchP, repeatM, squeeze, unzipP, integersP, toGaussian)
+import Data.Network.Utils (makeBatchP, repeatM, squeeze, unzipP, integersP, toGaussian, averageP, accuracyBatch)
 
 -- import System.Random
 -- import Data.Binary.Get
@@ -62,53 +62,50 @@ main = do
               (imageP, labelP) = unzipP trainingSamplesP :: (Producer Image IO (), Producer Label IO ())
               -- Batch sample producer(pairs of matrix)
               trainingBatches = PP.zip (imageP >-> (makeBatchP batchsize)) (labelP  >-> (makeBatchP batchsize))
+              testSamplesP    = each samples' :: Producer MNISTSample IO ()
+              testBatches     = uncurry PP.zip $ bimap (>-> makeBatchP batchsize) (>-> makeBatchP batchsize) (unzipP testSamplesP)
           g <- getStdGen
           -- let xavier = fmap (\(FC w b af) -> FC (scale (sqrt $ recip $ fromIntegral $ (uncurry (+)) (size w)) w) b af)
-          let !(model :: FeedForwardFC Batch) = (makeRandomNetwork g id id 784 [(30, logistic)] (10, softmaxMat))
+          let !(model :: FeedForwardFC Batch) = (makeRandomNetwork g id id 784 [(1000, logistic)] (10, softmaxMat))
               -- !model' = fmap (\(FC w b af) -> let (u,_,_) = svd w in (FC u b af)) model
               lf = mse
-              lrf = const 1 -- \n -> exp (-(1.0 + fromIntegral n))
+              lrf = const 0.05 -- \n -> exp (-(1.0 + fromIntegral n))
               tolerance = 0.0001
+              test m = do
+                (i,t) <- await
+                let r = runNetwork m i
+                    loss = evaluate lf (t, fst r)
+                    a    = accuracyBatch (fst r, t)
+                yield ((toDouble loss), a)
               reporter (i,t) ts = do
-                putStr "."
-                -- putStrLn "Weights : "
-                -- mapM_ (print . fst) $ runLayers (tsmodel ts) i
-                -- putStrLn "Gradients: "
-                -- GradBatch (gs, ds) <- grad lf (tsmodel ts, (i,t))
-                -- mapM_ (putStrLn . disps 5) gs
-                -- mapM_ print ds
-              -- predict = \i ts -> mapM_ (print . fst) $ runLayers (tsmodel ts) i
+                putStrLn $ show ts
               interval = 10
               stopper = (uncurry (liftM2 (<|>)) . ((closeEnough tolerance) &&& (longEnough 100)))
               loop m = do -- the actual training steps
                 s@(sid, (i,t)) <- await
-                lift $ putStrLn $ "Input " ++ show (fst s)
-                -- lift $ putStrLn $ "Biases " ++ show (map biases $ Data.Network.toList m)
-                -- lift $ putStrLn $ "Weights " ++ show (map weights $ Data.Network.toList m)
-                -- lift $ putStrLn $ "Initial Prediction: " ++ show (map fst $ runLayers m i)
-                -- g <- PP.map (grad lf) (m, (i,t))
-                -- (m')
+                -- lift $ putStrLn $ "Input " ++ show (fst s)
                 r <- lift $ runEffect $ (stepP m lf 0 lrf s) >-> reportP interval (reporter (i,t)) >->
                   (descendP (stopper))
-                -- let r = runNetwork m i
-                -- let l = toDouble $ evaluate lf (t, fst r)
+                -- lift $ putStrLn ""
                 yield r
-                -- lift $ mapM_ ((>> putStrLn "") . print) (map weights $ Data.Network.toList (tsmodel r))
                 loop (tsmodel r)
               
-              trainingChain m = PP.zip (integersP 0) trainingBatches >-> (PP.take 10000) >-> (loop m)
+              trainingChain m = PP.zip (integersP 0) trainingBatches >-> (PP.take 100) >-> (loop m)
+              -- Train over all training samples, then test with testing dataset, for each iteration
+              -- One iteration = one epoch
               loop' m n = do
+                lift $ putStrLn $ "Epoch: " ++ show n 
                 (Just r) <- lift $ PP.last (trainingChain m)
-                yield (n, r)
+                yield r
+                let (lossP, accuracyP) = unzipP $ testBatches >-> test (tsmodel r)
+                (loss, accuracy) <- lift $ liftM2 (,) (averageP lossP) (averageP accuracyP)
+                lift $ putStrLn $ "Test loss: " ++ show (fst loss)
+                lift $ putStrLn $ "Test accuracy: " ++ show (fst accuracy)
                 loop' (tsmodel r) (succ n)
                 
-          runEffect $ for ((loop' model 0) >-> (PP.take 10)) $ \(n,ts) -> do
-            lift $ putStrLn $ "Epoch: " ++ show n 
+          runEffect $ for ((loop' model 0) >-> (PP.take 100)) $ \ts -> do
+            lift $ putStrLn ""
             lift $ print ts
-
-          -- runEffect $ for (trainingBatches >-> (PP.take 10)) $ \(i,l) -> do
-          --   lift $ putStrLn $ disps 5 i
-          --   lift $ print l
           
       putStrLn "Done!"
     Left er -> putStrLn er

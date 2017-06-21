@@ -113,18 +113,17 @@ instance (Monad m) => GradientDescent (NetworkEvaluator Batch) ((FeedForwardFC B
 
   -- Gradients over parameters(weights, biases)
   grad lf (n, (i,t)) = do
-    let aos = runLayers n i -- forward propagation: compute layers outputs and activation derivatives        
-        (as, as') = (unzip) aos 
+    let (as, as') = unzip $ runLayers n i -- forward propagation: compute layers outputs and activation derivatives
         (out) = last as
-    (ds) <- backward lf n (out, t) (init as') -- compute gradients with backpropagation
+    (ds) <- backward lf n (out, t) (init as') -- compute deltas with backpropagation
+    let r  = fromIntegral $ rows i -- size of minibatch
     let gs = zipWith (\δ a -> tr (δ <> a)) ds (i:init as)
-    return $ GradBatch (gs, squeeze <$> ds)
+    return $ GradBatch ((recip r .*) <$> gs, ((recip r .*) . squeeze) <$> ds)
 
   move lr (n, (i,t)) (GradBatch (gs, ds)) = do
     -- update function
     -- divide by batch size
-    let r = fromIntegral $ rows i
-        update = (\(FC w b af) g δ -> FC (w + (lr/r).*g) (b + (lr/r).*δ) af)
+    let update = (\(FC w b af) g δ -> FC (w + (lr).*g) (b + (lr).*δ) af)
         n' = Network.fromList $ zipWith3 update (Network.toList n) gs ds -- new model
     return (n', (i,t))
 

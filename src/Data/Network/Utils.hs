@@ -8,8 +8,8 @@
 module Data.Network.Utils
  (repeatM, scanl, randomInput, rowNorm, rowNorm', (.*), (*.),
   Differentiable, derivate, squeeze, squish, toGaussian,
-  makeBatchP, unzipP, integersP,
-  accuracy)
+  makeBatchP, unzipP, integersP, averageP,
+  accuracy, accuracyBatch)
 where
 
 import Prelude hiding (scanl, zip)
@@ -93,6 +93,10 @@ rangeP !a !b
 whileMaybe :: (Monad m) => Proxy a' a b' b m r -> Proxy a' a b' (Maybe b) m r
 whileMaybe p = for p (respond . Just) <* respond Nothing
 
+averageP :: (Monad m, Num a, Floating a) => Producer a m r -> m (a, r)
+averageP = PP.fold' (\x r -> bimap (+r) (+1) x) (0,0) (uncurry (/))
+  
+
 -----------------------------------------------------------------------------------
 -- Random stream transformation
 -----------------------------------------------------------------------------------
@@ -107,11 +111,17 @@ toGaussian (a:b:cs) = (r * cos θ):(r * sin θ):toGaussian cs
 accuracy :: [(Vector R, Vector R)] -> Double
 accuracy outs = (/ (fromIntegral $ length outs)) $ fromIntegral $ length $ filter (\(y,y') -> (maxIndex y == maxIndex y')) outs 
 
-accuracyBatch :: [(Matrix R, Matrix R)] -> Double
-accuracyBatch outs = let n = (fromIntegral $ length outs)
-                         hits = fromIntegral $ length $ do
-                           a <- outs
-                           let (idx, idx') = bimap (fmap maxIndex . toRows) (fmap maxIndex . toRows) a
-                           filter id (zipWith (==) idx idx')
+
+accuracyBatch :: (Matrix R, Matrix R) -> Double
+accuracyBatch out = let n = fromIntegral $ rows $ fst out
+                        hits = let (idx, idx') = bimap (fmap maxIndex . toRows) (fmap maxIndex . toRows) out
+                               in fromIntegral $ length $ filter id (zipWith (==) idx idx')
                      in  hits/n
   
+hitBatchP :: (Floating a, Monad m) => Pipe (Matrix R, Matrix R) a m ()
+hitBatchP = do
+  (o,t) <- await
+  let (idx, idx') = bimap (fmap maxIndex . toRows) (fmap maxIndex . toRows) (o,t)
+      hits = filter id (zipWith (==) idx idx')
+  yield $ (fromIntegral $ length hits) / (fromIntegral $ rows o)
+      
